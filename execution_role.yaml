@@ -24,6 +24,7 @@ Resources:
               - sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
       Path: /
       Policies:
         - PolicyName: ExecutionPolicy

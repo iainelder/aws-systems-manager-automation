@@ -1,5 +1,7 @@
 # AWS Systems Manager Automation
 
+## Day 1. 2022-08-13.
+
 Download the example execution role from the User Guide and save it as a YAML file.
 
 ```bash
@@ -286,7 +288,7 @@ I can't find that ID in the target account or in the management account.
 
 See the document about CloudWatch Logs. Maybe I can use scripts instead of API calls to write the output to a log.
 
-# References
+### References
 
 [AWS Systems Manager User Guide: Running automations in multiple AWS Regions and accounts](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-automation-multiple-accounts-and-regions.html)
 
@@ -295,3 +297,462 @@ See the document about CloudWatch Logs. Maybe I can use scripts instead of API c
 [Adrian Hornsby: Creating your own Chaos Monkey with AWS Systems Manager Automation](https://medium.com/the-cloud-architect/creating-your-own-chaos-monkey-with-aws-systems-manager-automation-6ad2b06acf20)
 
 [AWS Systems Manager User Guide: Logging Automation action output with CloudWatch Logs](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-action-logging.html)
+
+## Day 2. 2022-08-14.
+
+I read more carefully the user guide from yesterday's references. From "Running automations":
+
+> ### How it works
+
+> [...]
+
+> Run the automation. When running automations across multiple Regions, accounts, or OUs, the automation you run from the primary account starts child automations in each of the target accounts. The automation in the primary account will have aws:executeAutomation steps for each of the target accounts.
+
+> Use the GetAutomationExecution, DescribeAutomationStepExecutions, and DescribeAutomationExecutions API operations from the AWS Systems Manager console or the AWS CLI to monitor automation progress. The output of the steps for the automation in your primary account will be the AutomationExecutionId of the child automations. To view the output of the child automations created in your target accounts, be sure to specify the appropriate account, Region, and AutomationExecutionId in your request.
+
+So the main automation does start child executions in the target accounts.
+
+The step action in the simple execution is "aws:executeAwsApi".
+
+The action for all steps in the multi-account execution is "aws:executeAutomation".
+
+The APIs to get execution info:
+
+* GetAutomationExecution: takes just an AutomationExecutionId
+* DescribeAutomationStepExceutions: takes an AutomationExercutionId and Filters over step executions
+* DescribeAutomationExecutions: takes just a filter over step executions
+
+Let's try again to get the output of the ListAccountAliases call.
+
+Extract just the parts we need to make the call to get the output of the child automation. The StepName contains the account ID and the region name and the exucution ID is part of the output.
+
+```bash
+aws ssm get-automation-execution \
+--automation-execution-id 0fd2b51c-3837-47c1-8780-9ced6fb2ef2f \
+--query 'AutomationExecution.StepExecutions[0].{StepName: StepName, ExecutionId: Outputs.ExecutionId[0]}'
+```
+
+```json
+{
+    "StepName": "749430203777_eu-west-1",
+    "ExecutionId": "a126db9b-fd69-4c9e-8399-a7f8740fa816"
+}
+```
+
+Set up a profile to query the target account.
+
+```bash
+crudini --get --format ini ~/.aws/config "profile sandbox-mgmt" \
+> ~/tmp/source
+
+cat > ~/tmp/target <<"EOF"
+[profile 749430203777]
+source_profile = sandbox-mgmt
+role_arn = arn:aws:iam::749430203777:role/OrganizationAccountAccessRole
+EOF
+
+cat ~/tmp/source ~/tmp/target > ~/tmp/profile
+
+export AWS_CONFIG_FILE=~/tmp/profile
+
+aws sts get-caller-identity --profile 749430203777
+```
+
+Get information about the child execution.
+
+```bash
+aws ssm get-automation-execution \
+--profile 749430203777 \
+--region eu-west-1 \
+--automation-execution-id a126db9b-fd69-4c9e-8399-a7f8740fa816
+```
+
+```json
+{
+    "AutomationExecution": {
+        "AutomationExecutionId": "a126db9b-fd69-4c9e-8399-a7f8740fa816",
+        "DocumentName": "get_account_alias",
+        "DocumentVersion": "1",
+        "ExecutionStartTime": "2022-08-14T01:24:34.736000+02:00",
+        "ExecutionEndTime": "2022-08-14T01:24:35.680000+02:00",
+        "AutomationExecutionStatus": "Success",
+        "StepExecutions": [
+            {
+                "StepName": "get_account_alias",
+                "Action": "aws:executeAwsApi",
+                "ExecutionStartTime": "2022-08-14T01:24:35.149000+02:00",
+                "ExecutionEndTime": "2022-08-14T01:24:35.639000+02:00",
+                "StepStatus": "Success",
+                "Inputs": {
+                    "Api": "\"ListAccountAliases\"",
+                    "Service": "\"iam\""
+                },
+                "StepExecutionId": "7a3ea8c9-b04c-4f62-ba98-154ce61d9b81",
+                "OverriddenParameters": {}
+            }
+        ],
+        "StepExecutionsTruncated": false,
+        "Parameters": {},
+        "Outputs": {},
+        "Mode": "Auto",
+        "ParentAutomationExecutionId": "0fd2b51c-3837-47c1-8780-9ced6fb2ef2f",
+        "ExecutedBy": "arn:aws:sts::480783779961:assumed-role/AWSReservedSSO_AdministratorAccess_10cd3aecf3710de6/iain",
+        "Targets": [],
+        "ResolvedTargets": {
+            "ParameterValues": [],
+            "Truncated": false
+        }
+    }
+}
+```
+
+The child step execution doesn't have an output!
+
+Compared to the simple execution, that appears to be the only difference.
+
+Do I need to add something to the automation document to make it appear in this case?
+
+Quick sanity check: does that account have an alias? (In other words, what output do I expect?)
+
+```bash
+aws iam list-account-aliases \
+--profile 749430203777 \
+--region eu-west-1
+```
+
+```json
+{
+    "AccountAliases": []
+}
+```
+
+Well it has no alias! So I'm not sure what the selector in the document output would return in this case.
+
+By the way: Adrian's Hornby's example includes a top-level output that refers to one of the step outputs. That might be important later.
+
+By the way: automation documented are now referred to as runbooks, according to "Working with runbooks".
+
+The [Selector] is described in [aws:executeAwsApi](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-action-executeAwsApi.html) documentation.
+
+The Selector documentation refers to the boto3 Client documentation to get information about the response shapes. So I would guess underneath it's using boto3 to make the API calls.
+
+But the selector uses JSONPath rather than the AWS CLI's JmesPath.
+
+What if I just use an API call that I know will return a result? For example, the [owner](https://docs.aws.amazon.com/AmazonS3/latest/API/API_Owner.html) output of the S3 ListBuckets API.
+
+```console
+$ aws s3api list-buckets --query 'Owner'
+{
+    "DisplayName": "iain+saa-general",
+    "ID": "2308ec9cb4f6d4ff98ea7a7f4224d2059fad41025afc1590c4bd0995943862c7"
+}
+$ aws s3api list-buckets --query 'Owner' --profile 749430203777
+{
+    "DisplayName": "iain+aws-tailifit",
+    "ID": "f99944a99d0795aa22f7d3caf79319732d99aaf88b1fb1aea282f04fffb809e2"
+}
+```
+
+I create a new runbook to call the ListBuckets API.
+
+Readable YAML version:
+
+```yaml
+description: Gets the account canonical ID.
+schemaVersion: '0.3'
+mainSteps:
+  - name: get_canonical_id
+    action: 'aws:executeAwsApi'
+    outputs:
+      - Name: canonical_id
+        Selector: $.Owner.ID
+        Type: String
+    inputs:
+      Service: s3
+      Api: ListBuckets
+```
+
+Complete document in JSON:
+
+```json
+{
+    "Name": "get_canonical_id",
+    "CreatedDate": "2022-08-14T14:17:34.512000+02:00",
+    "DocumentVersion": "1",
+    "Status": "Active",
+    "Content": "{\n  \"description\" : \"Gets the account canonical ID.\",\n  \"schemaVersion\" : \"0.3\",\n  \"mainSteps\" : [ {\n    \"name\" : \"get_canonical_id\",\n    \"action\" : \"aws:executeAwsApi\",\n    \"outputs\" : [ {\n      \"Name\" : \"canonical_id\",\n      \"Selector\" : \"$.Owner.ID\",\n      \"Type\" : \"String\"\n    } ],\n    \"inputs\" : {\n      \"Service\" : \"s3\",\n      \"Api\" : \"ListBuckets\"\n    }\n  } ]\n}",
+    "DocumentType": "Automation",
+    "DocumentFormat": "JSON"
+}
+```
+
+The result of a simple execution. The output contains the canonical ID `2308ec9cb4f6d4ff98ea7a7f4224d2059fad41025afc1590c4bd0995943862c7`.
+
+```bash
+aws ssm get-automation-execution \
+--automation-execution-id e965468d-7dcc-4477-84ec-592a314b2937
+```
+
+```json
+{
+    "AutomationExecution": {
+        "AutomationExecutionId": "e965468d-7dcc-4477-84ec-592a314b2937",
+        "DocumentName": "get_canonical_id",
+        "DocumentVersion": "1",
+        "ExecutionStartTime": "2022-08-14T14:19:14.692000+02:00",
+        "ExecutionEndTime": "2022-08-14T14:19:15.314000+02:00",
+        "AutomationExecutionStatus": "Success",
+        "StepExecutions": [
+            {
+                "StepName": "get_canonical_id",
+                "Action": "aws:executeAwsApi",
+                "ExecutionStartTime": "2022-08-14T14:19:14.975000+02:00",
+                "ExecutionEndTime": "2022-08-14T14:19:15.277000+02:00",
+                "StepStatus": "Success",
+                "Inputs": {
+                    "Api": "\"ListBuckets\"",
+                    "Service": "\"s3\""
+                },
+                "Outputs": {
+                    "canonical_id": [
+                        "2308ec9cb4f6d4ff98ea7a7f4224d2059fad41025afc1590c4bd0995943862c7"
+                    ]
+                },
+                "StepExecutionId": "2e4c97c5-6517-4b11-b421-96537b96d311",
+                "OverriddenParameters": {}
+            }
+        ],
+        "StepExecutionsTruncated": false,
+        "Parameters": {},
+        "Outputs": {},
+        "Mode": "Auto",
+        "ExecutedBy": "arn:aws:sts::480783779961:assumed-role/AWSReservedSSO_AdministratorAccess_10cd3aecf3710de6/iain",
+        "Targets": [],
+        "ResolvedTargets": {
+            "ParameterValues": [],
+            "Truncated": false
+        }
+    }
+}
+```
+
+The result of a multi-account execution.
+
+The CLI command generated by the automation console.
+
+```bash
+aws ssm start-automation-execution \
+--document-name "get_canonical_id" \
+--document-version "\$DEFAULT" \
+--target-locations '[
+    {
+        "Accounts":["749430203777","345132479590","139442570134","975072629527","644347852375","897617218731","973820050801"],
+        "Regions":["eu-west-1"]
+    }]' \
+--region eu-west-1
+```
+
+The main execution ID is bdfd4611-1118-4414-a1a8-c5b1db5b655a.
+
+Overall it fails because the ListBuckets API call is denied.
+
+```bash
+aws ssm get-automation-execution \
+--automation-execution-id bdfd4611-1118-4414-a1a8-c5b1db5b655a \
+--query 'AutomationExecution.StepExecutions[0].{StepName: StepName, ExecutionId: Outputs.ExecutionId[0]}'
+```
+
+```json
+{
+    "StepName": "749430203777_eu-west-1",
+    "ExecutionId": "67f10557-c817-4d34-920c-da064ea6a6ef"
+}
+```
+
+```bash
+aws ssm get-automation-execution \
+--profile 749430203777 \
+--region eu-west-1 \
+--automation-execution-id 67f10557-c817-4d34-920c-da064ea6a6ef
+```
+
+```json
+{
+    "AutomationExecution": {
+        "AutomationExecutionId": "67f10557-c817-4d34-920c-da064ea6a6ef",
+        "DocumentName": "get_canonical_id",
+        "DocumentVersion": "1",
+        "ExecutionStartTime": "2022-08-14T14:24:22.201000+02:00",
+        "ExecutionEndTime": "2022-08-14T14:24:23.082000+02:00",
+        "AutomationExecutionStatus": "Failed",
+        "StepExecutions": [
+            {
+                "StepName": "get_canonical_id",
+                "Action": "aws:executeAwsApi",
+                "ExecutionStartTime": "2022-08-14T14:24:22.804000+02:00",
+                "ExecutionEndTime": "2022-08-14T14:24:23.042000+02:00",
+                "StepStatus": "Failed",
+                "Inputs": {
+                    "Api": "\"ListBuckets\"",
+                    "Service": "\"s3\""
+                },
+                "FailureMessage": "Step fails when it is Execute/Cancelling action. An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied. Please refer to Automation Service Troubleshooting Guide for more diagnosis details.",
+                "FailureDetails": {
+                    "FailureStage": "Invocation",
+                    "FailureType": "Verification",
+                    "Details": {
+                        "VerificationErrorMessage": [
+                            "An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied"
+                        ]
+                    }
+                },
+                "StepExecutionId": "1f4b3ef2-2ab7-4927-978c-2bc11619544c",
+                "OverriddenParameters": {}
+            }
+        ],
+        "StepExecutionsTruncated": false,
+        "Parameters": {},
+        "Outputs": {},
+        "FailureMessage": "Step fails when it is Execute/Cancelling action. An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied. Please refer to Automation Service Troubleshooting Guide for more diagnosis details.",
+        "Mode": "Auto",
+        "ParentAutomationExecutionId": "bdfd4611-1118-4414-a1a8-c5b1db5b655a",
+        "ExecutedBy": "arn:aws:sts::480783779961:assumed-role/AWSReservedSSO_AdministratorAccess_10cd3aecf3710de6/iain",
+        "Targets": [],
+        "ResolvedTargets": {
+            "ParameterValues": [],
+            "Truncated": false
+        }
+    }
+}
+```
+
+I need to modify the execution role to all the action. For now I will attach the read-only managed policy.
+
+I'm still not completely sure about the `iam:PassRole` part in the inline policy. Is it really required? Is it scoped correctly? According to the "pass a role" documentation, it can't be used to pass cross-account roles. So what is it for? For now I will leave it in.
+
+I updated the stack set with the new policy.
+
+Now I execution the automation again with the generated CLI command.
+
+```json
+{
+    "AutomationExecutionId": "d1c977e6-eade-4cb6-b55e-a1ba47b37119"
+}
+```
+
+The first one has succeeded already.
+
+```bash
+aws ssm get-automation-execution \
+--automation-execution-id d1c977e6-eade-4cb6-b55e-a1ba47b37119
+```
+
+```json
+{
+    "AutomationExecution": {
+        "AutomationExecutionId": "d1c977e6-eade-4cb6-b55e-a1ba47b37119",
+        "DocumentName": "get_canonical_id",
+        "DocumentVersion": "1",
+        "ExecutionStartTime": "2022-08-14T14:58:50.573000+02:00",
+        "AutomationExecutionStatus": "InProgress",
+        "StepExecutions": [
+            {
+                "StepName": "749430203777_eu-west-1",
+                "Action": "aws:executeAutomation",
+                "ExecutionStartTime": "2022-08-14T14:58:51.331000+02:00",
+                "ExecutionEndTime": "2022-08-14T14:58:52.114000+02:00",
+                "StepStatus": "Success",
+                "Inputs": {},
+                "Outputs": {
+                    "ExecutionId": [
+                        "a8cf2652-b8bf-40bd-9ee7-1ad3dd80dc6e"
+                    ]
+                },
+                "StepExecutionId": "2c7f5e86-62eb-4457-bbb9-6969b47c8d48",
+                "OverriddenParameters": {}
+            },
+        ...
+        ]
+    }
+}
+```
+
+This time the child automation has the output that we expect! The canonical ID in the output matches what I got from the direct API call.
+
+```bash
+aws ssm get-automation-execution \
+--profile 749430203777 \
+--region eu-west-1 \
+--automation-execution-id a8cf2652-b8bf-40bd-9ee7-1ad3dd80dc6e
+```
+
+```json
+{
+    "AutomationExecution": {
+        "AutomationExecutionId": "a8cf2652-b8bf-40bd-9ee7-1ad3dd80dc6e",
+        "DocumentName": "get_canonical_id",
+        "DocumentVersion": "1",
+        "ExecutionStartTime": "2022-08-14T14:58:51.236000+02:00",
+        "ExecutionEndTime": "2022-08-14T14:58:52.032000+02:00",
+        "AutomationExecutionStatus": "Success",
+        "StepExecutions": [
+            {
+                "StepName": "get_canonical_id",
+                "Action": "aws:executeAwsApi",
+                "ExecutionStartTime": "2022-08-14T14:58:51.645000+02:00",
+                "ExecutionEndTime": "2022-08-14T14:58:51.993000+02:00",
+                "StepStatus": "Success",
+                "Inputs": {
+                    "Api": "\"ListBuckets\"",
+                    "Service": "\"s3\""
+                },
+                "Outputs": {
+                    "canonical_id": [
+                        "f99944a99d0795aa22f7d3caf79319732d99aaf88b1fb1aea282f04fffb809e2"
+                    ]
+                },
+                "StepExecutionId": "0be84212-8ace-4dea-b419-9f42598eec16",
+                "OverriddenParameters": {}
+            }
+        ],
+        "StepExecutionsTruncated": false,
+        "Parameters": {},
+        "Outputs": {},
+        "Mode": "Auto",
+        "ParentAutomationExecutionId": "d1c977e6-eade-4cb6-b55e-a1ba47b37119",
+        "ExecutedBy": "arn:aws:sts::480783779961:assumed-role/AWSReservedSSO_AdministratorAccess_10cd3aecf3710de6/iain",
+        "Targets": [],
+        "ResolvedTargets": {
+            "ParameterValues": [],
+            "Truncated": false
+        }
+    }
+}
+```
+
+So as a proof of concept it works. To make it practical I need to figure out a way to gather the output from all the child executions.
+
+Options:
+
+* Adding more outputs as in Adrian Hornsby's example? Not sure if it magically propagates to the parent.
+* Logging to CloudWatch? May only work for script executions.
+* Scraping the result with botocove? It would be great to avoid botocove to solve this, because I can already solve this problem with botocove, although the runbook might be faster at large scales.
+* EventBridge and a cross-account event bus? Events are emitted on a best effort basis. But this might be the most efficient way.
+
+### References
+
+[AWS Systems Manager User Guide: Working with runbooks](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-documents.html)
+
+[AWS Systems Manager Automation runbook reference](https://docs.aws.amazon.com/systems-manager-automation-runbooks/latest/userguide/automation-runbook-reference.html)
+
+[AWS S3 API Reference: Owner](https://docs.aws.amazon.com/AmazonS3/latest/API/API_Owner.html)
+
+[AWS S3 User Guide: Finding the canonical user ID for your AWS account](https://docs.aws.amazon.com/AmazonS3/latest/userguide/finding-canonical-user-id.html)
+
+[AWS IAM User Guide: Granting a user permissions to pass a role to an AWS service](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_passrole.html) (How to use `iam:PassRole`)
+
+[Service Authorization Reference: Action resources, and condition keys for IAM](https://docs.aws.amazon.com/service-authorization/latest/reference/list_identityandaccessmanagement.html) (`iam:PassRole` permission, `iam: AssociatedResourceArn` condition key, `iam:PassedToService` condition key)
+
+[Rowan Udell: AWS IAM:PassRole explained](https://blog.rowanudell.com/iam-passrole-explained/)
+
+[AWS Systems Manager User Guide: Monitoring Systems Manager events with Amazon EventBridge](https://docs.aws.amazon.com/systems-manager/latest/userguide/monitoring-eventbridge-events.html)
