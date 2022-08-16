@@ -756,3 +756,56 @@ Options:
 [Rowan Udell: AWS IAM:PassRole explained](https://blog.rowanudell.com/iam-passrole-explained/)
 
 [AWS Systems Manager User Guide: Monitoring Systems Manager events with Amazon EventBridge](https://docs.aws.amazon.com/systems-manager/latest/userguide/monitoring-eventbridge-events.html)
+
+## Day 3. 2022-08-17.
+
+EventBridge has two disadvantages: it requires me to create an event bus and a rule in the the target account; and it promises "best effort" delivery of completion events. And I'm still not even sure if the completion event contains the output.
+
+Before exploring EventBridge, I would like to try using an extra step in the automation to write the output to an S3 bucket. I want to try this to reduce the footprint in the target accounts. Ideally, I shouldn't have to create any resources in the target account to retrieve the result.
+
+I save the runbook to a file so that I may modify it. I create it as a stack.
+
+```bash
+sam deploy --stack-name runbook --template-file runbook_stack.yaml
+```
+
+I create an S3 bucket to dump the automation output.
+
+```bash
+aws s3api create-bucket \
+--bucket isme-automation-dump \
+--create-bucket-configuration LocationConstraint=eu-west-1 \
+--profile sandbox-mgmt
+```
+
+```json
+{
+    "Location": "http://isme-automation-dump.s3.amazonaws.com/"
+}
+```
+
+I execute the runbook in simple mode in the console. The execution ID is e7d0d280-0108-4fe9-83d7-db7919024f0b.
+
+The put_output_in_s3 step fails.
+
+> Step fails when it is Execute/Cancelling action. PutObject API is not supported. Please refer to Automation Service Troubleshooting Guide for more diagnosis details.
+
+The [troubleshooting guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-troubleshooting.html) says nothing about supported APIs.
+
+[aws:executeAwsApi](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-action-executeAwsApi.html) says about support:
+
+> Most API operations are supported, although not all API operations have been tested. Streaming API operations, such as the GetObject operation, aren't supported. If you're not sure if an API operation you want to use is a streaming operation, review the Boto3 documentation for the service to determine if an API requires streaming inputs.
+
+The [Boto3 documentation for PutObject](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3.html#S3.Client.put_object) shows "**Body** _(bytes or seekable file-like object)_ -- Object data.".
+
+It doesn't explicitly say that it is a stream parameter, but I think it's reasonable to assume that the body would be a stream.
+
+So I can't call the S3 API like this. Can I call it in a script?
+
+### References
+
+[AWS Systems Manager User Guide: Troubleshooting Systems Manager Automation](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-troubleshooting.html)
+
+[AWS Systems Manager User Guide: aws:executeAwsApi](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-action-executeAwsApi.html)
+
+[Boto3 documentation for PutObject](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3.html#S3.Client.put_object)

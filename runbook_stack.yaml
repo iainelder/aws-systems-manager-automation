@@ -1,0 +1,40 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  Runbook:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: get_canonical_id
+      DocumentType: Automation
+      DocumentFormat: YAML
+      UpdateMethod: NewVersion
+      Content:
+
+        description: Gets the account canonical ID.
+        schemaVersion: '0.3'
+        mainSteps:
+
+          - name: get_canonical_id
+            action: 'aws:executeAwsApi'
+            outputs:
+              - Name: canonical_id
+                Selector: $.Owner.ID
+                Type: String
+            inputs:
+              Service: s3
+              Api: ListBuckets
+
+          - name: put_output_in_s3
+            action: "aws:executeAwsApi"
+            inputs:
+              Service: s3
+              Api: PutObject
+              Bucket: isme-automation-dump
+              Key: "{{automation:EXECUTION_ID}}/{{global:ACCOUNT_ID}}/{{global:REGION}}/output"
+              Body: "{{ get_canonical_id.canonical_id }}" 
+            outputs:
+              - Name: put_return_value
+                Selector: $
+                Type: String
+
