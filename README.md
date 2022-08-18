@@ -809,3 +809,119 @@ So I can't call the S3 API like this. Can I call it in a script?
 [AWS Systems Manager User Guide: aws:executeAwsApi](https://docs.aws.amazon.com/systems-manager/latest/userguide/automation-action-executeAwsApi.html)
 
 [Boto3 documentation for PutObject](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3.html#S3.Client.put_object)
+
+## Day 4. 2022-08-18.
+
+Rewrite the runbook as a script in runbook_script_stack.yaml.
+
+```bash
+sam deploy --stack-name runbook-script --template-file runbook_script_stack.yaml
+```
+
+Simple execution ID: 7a33ec16-30d8-4ac0-9ea0-0c9ca9c52651
+
+It failed because Session isn't recognized.
+
+```
+Step fails when it is Poll action status for completion. Traceback (most recent call last): File "/tmp/30773a34-df45-44cf-bcd5-1a9e978a698f-2022-08-17-22-55-40/customer_script.py", line 2, in handler session = Session() NameError: name 'Session' is not defined NameError - name 'Session' is not defined. Please refer to Automation Service Troubleshooting Guide for more diagnosis details.
+```
+
+Add the import.
+
+Simple execution ID: 92015b55-9aa4-4ebb-98a0-c92ae03247c3
+
+It failed with VerificationErrorMessage in PostVerification stage.
+
+```
+Traceback (most recent call last):
+  File "/tmp/9e524b80-14a6-493a-aa0e-9f40db43781c-2022-08-17-22-58-49/customer_script.py", line 6, in handler
+    owner_id = client.list_buckets()["Owner"]["Id"]
+  File "/var/runtime/botocore/client.py", line 391, in _api_call
+    return self._make_api_call(operation_name, kwargs)
+  File "/var/runtime/botocore/client.py", line 705, in _make_api_call
+    http, parsed_response = self._make_request(
+  File "/var/runtime/botocore/client.py", line 725, in _make_request
+    return self._endpoint.make_request(operation_model, request_dict)
+  File "/var/runtime/botocore/endpoint.py", line 104, in make_request
+    return self._send_request(request_dict, operation_model)
+  File "/var/runtime/botocore/endpoint.py", line 134, in _send_request
+    request = self.create_request(request_dict, operation_model)
+  File "/var/runtime/botocore/endpoint.py", line 117, in create_request
+    self._event_emitter.emit(event_name, request=request,
+  File "/var/runtime/botocore/hooks.py", line 357, in emit
+    return self._emitter.emit(aliased_event_name, **kwargs)
+  File "/var/runtime/botocore/hooks.py", line 228, in emit
+    return self._emit(event_name, kwargs)
+  File "/var/runtime/botocore/hooks.py", line 211, in _emit
+    response = handler(**kwargs)
+  File "/var/runtime/botocore/signers.py", line 93, in handler
+    return self.sign(operation_name, request)
+  File "/var/runtime/botocore/signers.py", line 165, in sign
+    auth.add_auth(request)
+  File "/var/runtime/botocore/auth.py", line 378, in add_auth
+    raise NoCredentialsError()
+botocore.exceptions.NoCredentialsError: Unable to locate credentials
+
+NoCredentialsError - Unable to locate credentials
+```
+
+Add the role.
+
+aws:executeScript always needs an explicit role to perform AWS CLI actions.
+
+But Which role to specify? The execution role doesn't exist in the management account. The administration role doesn't exist yet.
+
+I create the administration role according to "Running automations in multiple AWS".
+
+```bash
+(
+   cd $(mktemp --dir)
+   wget -q https://docs.aws.amazon.com/systems-manager/latest/userguide/samples/AWS-SystemManager-AutomationAdministrationRole.zip
+   unzip -q AWS-SystemManager-AutomationAdministrationRole.zip
+   cfn-flip AWS-SystemManager-AutomationAdministrationRole.json
+) \
+> administration_role.yaml
+```
+
+```bash
+sam deploy \
+--stack-name ssm-admin-role \
+--template-file administration_role.yaml \
+--capabilities CAPABILITY_NAMED_IAM
+```
+
+Simple execution ID: 73f34953-8c1c-49e4-9244-ace8452696c1
+
+It failed with VerificationErrorMessage in FailureStage PostVerification.
+
+```text
+Traceback (most recent call last):
+  File "/tmp/89710273-c4f5-4f23-a60d-43da6049f06a-2022-08-18-07-47-56/customer_script.py", line 6, in handler
+    owner_id = client.list_buckets()["Owner"]["Id"]
+  File "/var/runtime/botocore/client.py", line 391, in _api_call
+    return self._make_api_call(operation_name, kwargs)
+  File "/var/runtime/botocore/client.py", line 719, in _make_api_call
+    raise error_class(parsed_response, operation_name)
+botocore.exceptions.ClientError: An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied
+
+ClientError - An error occurred (AccessDenied) when calling the ListBuckets operation: Access Denied
+```
+
+So now I am passing the role. The administration role has no permissions to do the things though.
+
+I'll add read-only permissions to it.
+
+After adding ReadOnlyAccess the function is able to perform AWS API calls.
+
+VerificationErrorMessage:
+
+```
+Traceback (most recent call last):
+  File "/tmp/7d7baeaf-32c7-4e78-b21f-c4d0d95010fc-2022-08-18-07-53-54/customer_script.py", line 6, in handler
+    owner_id = client.list_buckets()["Owner"]["Id"]
+KeyError: 'Id'
+
+KeyError - 'Id'
+```
+
+Now I need to fix the programming error.

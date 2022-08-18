@@ -1,0 +1,45 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  Runbook:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: get_canonical_id_script
+      DocumentType: Automation
+      DocumentFormat: YAML
+      UpdateMethod: NewVersion
+      Content:
+
+        description: Gets the account canonical ID.
+        schemaVersion: '0.3'
+        assumeRole: "{{AutomationAssumeRole}}"
+        parameters:
+          AutomationAssumeRole: 
+            type: String
+            description: >
+              (Optional) The ARN of the role that allowed Automation to perform
+              the actions on your behalf.
+        mainSteps:
+
+          - name: get_canonical_id
+            action: "aws:executeScript"
+            inputs:
+              Runtime: python3.8
+              Handler: handler
+              InputPayload:
+                Key: "{{automation:EXECUTION_ID}}/{{global:ACCOUNT_ID}}/{{global:REGION}}/output"
+                
+              Script: |-
+                from boto3.session import Session
+                
+                def handler(events, context):
+                    session = Session()
+                    client = session.client("s3")
+                    owner_id = client.list_buckets()["Owner"]["Id"]
+                    response = client.put_object(
+                      Bucket="isme-automation-dump",
+                      Key=events["Key"],
+                      Body=canonical_id
+                    )
+                    return response
